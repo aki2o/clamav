@@ -1,0 +1,80 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use POSIX qw{ mkfifo };
+use File::Find;
+
+my $title = "ClamScan";
+my $zenity = "/usr/bin/zenity";
+my $clamscan = "/usr/bin/clamscan";
+
+# Open FIFO for reading the result of scan
+my $fifo = "/tmp/myclamscan.$$.fifo";
+mkfifo($fifo, 0600) or die "Failed make fifo : $!";
+
+# Count the number of target
+my $target_dir = $ARGV[0];
+my $target_num = 0;
+find(sub {
+    $target_num++;
+}, $target_dir);
+
+# Start progress bar
+my $prog_msg = "$target_dir をスキャンしています...";
+my $prog_cmd = "$zenity --progress --auto-close --auto-kill --title '$title' --text '$prog_msg'";
+open my $ph, '| '.$prog_cmd.' > /dev/null 2>&1' or clean_exit(1, "Failed start progress : $!");
+
+# Start scan
+my $pid = fork();
+if ( $pid == 0 ) {
+    exec "$clamscan @ARGV > $fifo";
+    exit 0;
+}
+
+# Read the result of scan
+my $finished_num = 0;
+my %virus_of;
+my $scan_finish;
+my $summary = "";
+open my $fh, '<', $fifo or clean_exit(1, "Failed open fifo : $!");
+while ( my $line = <$fh> ) {
+    chomp $line;
+    if ( $scan_finish ) {
+        $summary .= "$line\n";
+    }
+    elsif ( $line =~ m{ ^ -+ \s+ SCAN \s+ SUMMARY \s+ -+ $ }xms ) {
+        $scan_finish = 1;
+    }
+    elsif ( $line =~ m{ ^ (.+?): \s+ OK $ }xms ) {
+        $finished_num++;
+        my $percentage = $finished_num / $target_num * 100;
+        print $ph "$percentage\n";
+    }
+    elsif ( $line =~ m{ ^ (.+?): \s+ (.+) \s+ FOUND $ }xms ) {
+        $virus_of{$1} = $2;
+    }
+}
+
+# Finish
+print $ph "100\n";
+if ( keys %virus_of ) {
+    my $msg = '以下のファイルからウィルスが検知されました。\n\n';
+    foreach my $fpath ( keys %virus_of ) {
+        $msg .= $fpath.' ... '.$virus_of{$fpath}.'\n';
+    }
+    system "$zenity --warning --title '$title' --text '$msg'";
+}
+clean_exit(0);
+
+
+sub clean_exit {
+    my $retcd = shift;
+    my $msg = shift;
+    close $fh if $fh;
+    close $ph if $ph;
+    unlink $fifo;
+    exit $retcd;
+}
+
+
