@@ -10,8 +10,10 @@ my $title = "ClamScan";
 my $zenity = "/usr/bin/zenity";
 my $clamscan = "/usr/bin/clamscan";
 my $starttime = strftime('%Y/%m/%d %H:%M', localtime);
+my $debuglogfile = "/tmp/clamscanity.$$.log";
 
 # Parse arguments
+debug_print("Start parse arguments ...");
 my (%opt, $sopt, $target_dir, $recursive);
 my @req_arg_sopts = qw{ d l f };
 ARG:
@@ -28,6 +30,8 @@ foreach my $arg ( @ARGV ) {
     elsif ( $arg =~ m{ \A -([a-zA-Z]) \z }xms              ) { $sopt = $1         ; }
     elsif ( ! $target_dir                                  ) { $target_dir = $arg ; }
 }
+debug_print("  Target Directory: $target_dir");
+debug_print("  Option: ".join(", ", map { $_."[".$opt{$_}."]" } keys %opt));
 if ( ! -d $target_dir ) {
     die "Not exists directory : $target_dir";
 }
@@ -36,13 +40,16 @@ if ( $opt{recursive} == 1     ||
      $opt{r} == 1             ||
      $opt{r} eq 'yes'         ) {
     $recursive = 1;
+    debug_print("  Recursive: on");
 }
 
 # Open FIFO for reading the result of scan
 my $fifo = "/tmp/clamscanity.$$.fifo";
+debug_print("Make fifo: $fifo");
 mkfifo($fifo, 0600) or die "Failed make fifo : $!";
 
 # Count the number of target
+debug_print("Start count the number of target files ...");
 my $target_num = 0;
 find(sub {
          return if $opt{exclude} && $File::Find::name =~ m{ $opt{exclude} }xms;
@@ -52,15 +59,18 @@ find(sub {
          return if ! $recursive && $File::Find::dir ne $target_dir;
          $target_num++;
 }, $target_dir);
+debug_print("  Got Number: $target_num");
 
 # Start progress bar
+debug_print("Show progress bar");
 my $prog_msg = 'ウィルススキャンを実行しています...\n\n';
-$prog_msg .= '開始日時： '.$starttime.'\n';
+$prog_msg .= '開始日時　　： '.$starttime.'\n';
 $prog_msg .= '対象フォルダ： '.$target_dir.'\n';
 my $prog_cmd = "$zenity --progress --auto-close --auto-kill --title '$title' --text '$prog_msg'";
-open my $ph, '| '.$prog_cmd.' > /dev/null 2>&1' or clean_exit(1, "Failed start progress : $!");
+open my $ph, '| '.$prog_cmd.' >> '.$debuglogfile.' 2>&1' or clean_exit(1, "Failed start progress : $!");
 
 # Start scan
+debug_print("Start $clamscan ...");
 my $pid = fork();
 if ( $pid == 0 ) {
     local $" = ' ';
@@ -69,6 +79,7 @@ if ( $pid == 0 ) {
 }
 
 # Read the result of scan
+debug_print("Start read the result of clamscan ...");
 my $finished_num = 0;
 my %virus_of;
 my $scan_finish;
@@ -81,6 +92,7 @@ while ( my $line = <$fh> ) {
     }
     elsif ( $line =~ m{ ^ -+ \s+ SCAN \s+ SUMMARY \s+ -+ $ }xms ) {
         $scan_finish = 1;
+        debug_print(" Found Finished");
     }
     elsif ( $line =~ m{ ^ (.+?): \s+ OK $ }xms ) {
         $finished_num++;
@@ -89,22 +101,27 @@ while ( my $line = <$fh> ) {
     }
     elsif ( $line =~ m{ ^ (.+?): \s+ (.+) \s+ FOUND $ }xms ) {
         $virus_of{$1} = $2;
+        debug_print("  Found Infected: $1 ... $2");
     }
 }
+debug_print("Summary of clamscan ...\n$summary");
 
 # Finish
 print $ph "100\n";
 if ( keys %virus_of ) {
+    debug_print("Show infect notification");
     my $msg = 'ウィルスが検知されました。\n\n';
-    $msg .= '開始日時： '.$starttime.'\n';
+    $msg .= '開始日時　　： '.$starttime.'\n';
     $msg .= '対象フォルダ： '.$target_dir.'\n\n';
     my $len = length maxstr(keys %virus_of);
     my $fmt = '%'.$len.'s ... %s\n';
+    debug_print("  Format: $fmt");
     $msg .= sprintf $fmt, "[ファイルパス]", "[ウィルス名]";
     foreach my $fpath ( keys %virus_of ) {
         $msg .= sprintf $fmt, $fpath, $virus_of{$fpath};
     }
-    system "$zenity --warning --title '$title' --text '$msg'";
+    debug_print("  Msg: $msg");
+    system "$zenity --warning --title '$title' --text '$msg' >> $debuglogfile 2>&1";
 }
 clean_exit(0);
 
@@ -112,10 +129,25 @@ clean_exit(0);
 sub clean_exit {
     my $retcd = shift;
     my $msg = shift || "";
+    debug_print("Exit with cleaning: $msg");
     close $fh if $fh;
     close $ph if $ph;
     unlink $fifo;
+    unlink $debuglogfile if ! is_debug() && -f $debuglogfile;
     print STDERR "$msg\n" if $msg ne "";
     exit $retcd;
+}
+
+sub is_debug {
+    return $ENV{CLAMSCANITY_DEBUG} ? 1 : 0;
+}
+
+sub debug_print {
+    my $msg = shift || "";
+    return if ! is_debug();
+    print "$msg\n";
+    open my $fh, '>>', $debuglogfile or return print STDERR "Can't open $debuglogfile : $!\n";
+    print $fh "$msg\n";
+    close $fh;
 }
 
