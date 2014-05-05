@@ -1,33 +1,69 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
-use POSIX qw{ mkfifo };
+use POSIX qw{ mkfifo strftime };
 use File::Find;
+use List::Util qw{ maxstr };
 
 my $title = "ClamScan";
 my $zenity = "/usr/bin/zenity";
 my $clamscan = "/usr/bin/clamscan";
+my $starttime = strftime('%Y/%m/%d %H:%M', localtime);
+
+# Parse arguments
+my (%opt, $sopt, $target_dir, $recursive);
+my @req_arg_sopts = qw{ d l f };
+ARG:
+foreach my $arg ( @ARGV ) {
+    # Value of short option
+    if ( $sopt ) {
+        $opt{$sopt} = grep { $_ eq $sopt } @req_arg_sopts ? $arg
+                    :                                       1;
+    }
+    $sopt = "";
+    # Etc
+    if    ( $arg =~ m{ \A --([^=]+)=["']?(.+)["']? \z }xms ) { $opt{$1} = $2      ; }
+    elsif ( $arg =~ m{ \A --([^=]+) \z }xms                ) { $opt{$1} = 1       ; }
+    elsif ( $arg =~ m{ \A -([a-zA-Z]) \z }xms              ) { $sopt = $1         ; }
+    elsif ( ! $target_dir                                  ) { $target_dir = $arg ; }
+}
+if ( ! -d $target_dir ) {
+    die "Not exists directory : $target_dir";
+}
+if ( $opt{recursive} == 1     ||
+     $opt{recursive} eq 'yes' ||
+     $opt{r} == 1             ||
+     $opt{r} eq 'yes'         ) {
+    $recursive = 1;
+}
 
 # Open FIFO for reading the result of scan
-my $fifo = "/tmp/myclamscan.$$.fifo";
+my $fifo = "/tmp/clamscanity.$$.fifo";
 mkfifo($fifo, 0600) or die "Failed make fifo : $!";
 
 # Count the number of target
-my $target_dir = $ARGV[0];
 my $target_num = 0;
 find(sub {
-    $target_num++;
+         return if $opt{exclude} && $File::Find::name =~ m{ $opt{exclude} }xms;
+         return if $opt{include} && $File::Find::name !~ m{ $opt{include} }xms;
+         return if $opt{"exclude-dir"} && $File::Find::dir =~ m{ $opt{"exclude-dir"} }xms;
+         return if $opt{"include-dir"} && $File::Find::dir !~ m{ $opt{"include-dir"} }xms;
+         return if ! $recursive && $File::Find::dir ne $target_dir;
+         $target_num++;
 }, $target_dir);
 
 # Start progress bar
-my $prog_msg = "$target_dir をスキャンしています...";
+my $prog_msg = 'ウィルススキャンを実行しています...\n\n';
+$prog_msg .= '開始日時： '.$starttime.'\n';
+$prog_msg .= '対象フォルダ： '.$target_dir.'\n';
 my $prog_cmd = "$zenity --progress --auto-close --auto-kill --title '$title' --text '$prog_msg'";
 open my $ph, '| '.$prog_cmd.' > /dev/null 2>&1' or clean_exit(1, "Failed start progress : $!");
 
 # Start scan
 my $pid = fork();
 if ( $pid == 0 ) {
+    local $" = ' ';
     exec "$clamscan @ARGV > $fifo";
     exit 0;
 }
@@ -59,9 +95,14 @@ while ( my $line = <$fh> ) {
 # Finish
 print $ph "100\n";
 if ( keys %virus_of ) {
-    my $msg = '以下のファイルからウィルスが検知されました。\n\n';
+    my $msg = 'ウィルスが検知されました。\n\n';
+    $msg .= '開始日時： '.$starttime.'\n';
+    $msg .= '対象フォルダ： '.$target_dir.'\n\n';
+    my $len = length maxstr(keys %virus_of);
+    my $fmt = '%'.$len.'s ... %s\n';
+    $msg .= sprintf $fmt, "[ファイルパス]", "[ウィルス名]";
     foreach my $fpath ( keys %virus_of ) {
-        $msg .= $fpath.' ... '.$virus_of{$fpath}.'\n';
+        $msg .= sprintf $fmt, $fpath, $virus_of{$fpath};
     }
     system "$zenity --warning --title '$title' --text '$msg'";
 }
@@ -70,11 +111,11 @@ clean_exit(0);
 
 sub clean_exit {
     my $retcd = shift;
-    my $msg = shift;
+    my $msg = shift || "";
     close $fh if $fh;
     close $ph if $ph;
     unlink $fifo;
+    print STDERR "$msg\n" if $msg ne "";
     exit $retcd;
 }
-
 
