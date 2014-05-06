@@ -123,15 +123,12 @@ if ( keys %virus_of ) {
     my $col_optstr = "--column='' --column='File' --column='Virus'";
     my @col_entries = map { "false '$_' '".$virus_of{$_}."'" } keys %virus_of;
     local $" = ' ';
-    my @chked = qx{ $zenity --list --title '$title' --text '$msg' --checklist $col_optstr @col_entries 2>>$dbglogfile };
+    my $chkret = qx{ $zenity --list --title '$title' --text '$msg' --checklist $col_optstr @col_entries 2>>$dbglogfile };
     INFECTED:
-    foreach my $file ( @chked ) {
+    foreach my $file ( split m{ \| }xms, $chkret ) {
         chomp $file;
-        my $pid = fork();
-        if ( $pid == 0 ) {
-            exec "$nautilus '$file'";
-            exit 0;
-        }
+        debug_print("Open nautilus about $file");
+        system "$nautilus '$file' >> $dbglogfile 2>&1 &";
     }
 }
 clean_exit(0);
@@ -161,4 +158,3 @@ sub debug_print {
     print $fh "$msg\n";
     close $fh;
 }
-
