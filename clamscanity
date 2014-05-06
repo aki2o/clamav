@@ -2,19 +2,21 @@
 
 use strict;
 use warnings;
+use utf8;
 use POSIX qw{ mkfifo strftime };
 use File::Find;
-use List::Util qw{ maxstr };
 
 my $title = "ClamScan";
 my $zenity = "/usr/bin/zenity";
 my $clamscan = "/usr/bin/clamscan";
+my $nautilus = "/usr/bin/nautilus";
 my $starttime = strftime('%Y/%m/%d %H:%M', localtime);
-my $debuglogfile = "/tmp/clamscanity.$$.log";
+my $dbglogfile = "/tmp/clamscanity.$$.log";
 
 # Parse arguments
 debug_print("Start parse arguments ...");
-my (%opt, $sopt, $target_dir, $recursive);
+my %opt = ( r => 0, recursive => 0 );
+my ($sopt, $target_dir, $recursive);
 my @req_arg_sopts = qw{ d l f };
 ARG:
 foreach my $arg ( @ARGV ) {
@@ -64,10 +66,11 @@ debug_print("  Got Number: $target_num");
 # Start progress bar
 debug_print("Show progress bar");
 my $prog_msg = 'ウィルススキャンを実行しています...\n\n';
-$prog_msg .= '開始日時　　： '.$starttime.'\n';
+$prog_msg .= '開始日時： '.$starttime.'\n';
 $prog_msg .= '対象フォルダ： '.$target_dir.'\n';
+$prog_msg .= '推定スキャンファイル数： '.$target_num.'\n';
 my $prog_cmd = "$zenity --progress --auto-close --auto-kill --title '$title' --text '$prog_msg'";
-open my $ph, '| '.$prog_cmd.' >> '.$debuglogfile.' 2>&1' or clean_exit(1, "Failed start progress : $!");
+open my $ph, '| '.$prog_cmd.' >> '.$dbglogfile.' 2>&1' or clean_exit(1, "Failed start progress : $!");
 
 # Start scan
 debug_print("Start $clamscan ...");
@@ -92,7 +95,7 @@ while ( my $line = <$fh> ) {
     }
     elsif ( $line =~ m{ ^ -+ \s+ SCAN \s+ SUMMARY \s+ -+ $ }xms ) {
         $scan_finish = 1;
-        debug_print(" Found Finished");
+        debug_print("  Found Finished");
     }
     elsif ( $line =~ m{ ^ (.+?): \s+ OK $ }xms ) {
         $finished_num++;
@@ -110,18 +113,26 @@ debug_print("Summary of clamscan ...\n$summary");
 print $ph "100\n";
 if ( keys %virus_of ) {
     debug_print("Show infect notification");
-    my $msg = 'ウィルスが検知されました。\n\n';
-    $msg .= '開始日時　　： '.$starttime.'\n';
-    $msg .= '対象フォルダ： '.$target_dir.'\n\n';
-    my $len = length maxstr(keys %virus_of);
-    my $fmt = '%'.$len.'s ... %s\n';
-    debug_print("  Format: $fmt");
-    $msg .= sprintf $fmt, "[ファイルパス]", "[ウィルス名]";
-    foreach my $fpath ( keys %virus_of ) {
-        $msg .= sprintf $fmt, $fpath, $virus_of{$fpath};
+    my $msg = 'スキャン開始日時： '.$starttime.'\n';
+    $msg .= '以下のファイルからウィルスが検知されました。\n\n';
+    $msg .= join("\n", keys %virus_of);
+    system "$zenity --warning --title '$title' --text '$msg' >> $dbglogfile 2>&1";
+    debug_print("Show virus information");
+    $msg = '感染ファイルとウィルス情報の一覧です。\n';
+    $msg .= 'チェックしたファイルのフォルダを開きます。\n';
+    my $col_optstr = "--column='' --column='File' --column='Virus'";
+    my @col_entries = map { "false '$_' '".$virus_of{$_}."'" } keys %virus_of;
+    local $" = ' ';
+    my @chked = qx{ $zenity --list --title '$title' --text '$msg' --checklist $col_optstr @col_entries 2>>$dbglogfile };
+    INFECTED:
+    foreach my $file ( @chked ) {
+        chomp $file;
+        my $pid = fork();
+        if ( $pid == 0 ) {
+            exec "$nautilus '$file'";
+            exit 0;
+        }
     }
-    debug_print("  Msg: $msg");
-    system "$zenity --warning --title '$title' --text '$msg' >> $debuglogfile 2>&1";
 }
 clean_exit(0);
 
@@ -133,7 +144,7 @@ sub clean_exit {
     close $fh if $fh;
     close $ph if $ph;
     unlink $fifo;
-    unlink $debuglogfile if ! is_debug() && -f $debuglogfile;
+    unlink $dbglogfile if ! is_debug() && -f $dbglogfile;
     print STDERR "$msg\n" if $msg ne "";
     exit $retcd;
 }
@@ -146,7 +157,7 @@ sub debug_print {
     my $msg = shift || "";
     return if ! is_debug();
     print "$msg\n";
-    open my $fh, '>>', $debuglogfile or return print STDERR "Can't open $debuglogfile : $!\n";
+    open my $fh, '>>', $dbglogfile or return print STDERR "Can't open $dbglogfile : $!\n";
     print $fh "$msg\n";
     close $fh;
 }
